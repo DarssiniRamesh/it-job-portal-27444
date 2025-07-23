@@ -178,12 +178,53 @@ def update_profile(
 
 # --------------- Jobs ------------------------
 
+from sqlalchemy import or_
+from . import models
+
 @router.post("/jobs", response_model=JobPublic, tags=["Jobs"], summary="Create job posting")
-def create_job(job: JobCreate, current_user=Depends(require_role(Role.employer))):
+def create_job(
+    job: JobCreate,
+    current_user: User = Depends(require_role(Role.employer)),
+    db: Session = Depends(get_db)
+):
     """
     Employer creates a new job posting.
     """
-    pass
+    db_job = db.query(models.Job).filter(
+        models.Job.title == job.title,
+        models.Job.company == job.company,
+        models.Job.employer_id == current_user.id,
+    ).first()
+    if db_job:
+        raise HTTPException(status_code=400, detail="Job with this title and company already exists for this employer.")
+    db_job = models.Job(
+        title=job.title,
+        description=job.description,
+        requirements=models.list_to_str(job.requirements),
+        location=job.location,
+        company=job.company,
+        salary_min=job.salary_min,
+        salary_max=job.salary_max,
+        remote=job.remote,
+        tags=models.list_to_str(job.tags),
+        employer_id=current_user.id,
+    )
+    db.add(db_job)
+    db.commit()
+    db.refresh(db_job)
+    return JobPublic(
+        id=db_job.id,
+        title=db_job.title,
+        description=db_job.description,
+        requirements=db_job.requirements_list,
+        location=db_job.location,
+        company=db_job.company,
+        salary_min=db_job.salary_min,
+        salary_max=db_job.salary_max,
+        remote=db_job.remote,
+        tags=db_job.tags_list,
+        employer_id=db_job.employer_id
+    )
 
 @router.get("/jobs", response_model=List[JobPublic], tags=["Jobs"], summary="List/search jobs")
 def list_jobs(
@@ -193,32 +234,137 @@ def list_jobs(
     tags: Optional[List[str]] = Query(None, description="Filter by skills/tags"),
     skip: int = 0,
     limit: int = 20,
+    db: Session = Depends(get_db)
 ):
     """
     Search and filter job postings.
     """
-    pass
+    query = db.query(models.Job)
+    if q:
+        search = f"%{q}%"
+        query = query.filter(
+            or_(
+                models.Job.title.ilike(search),
+                models.Job.description.ilike(search),
+                models.Job.company.ilike(search),
+                models.Job.location.ilike(search)
+            )
+        )
+    if location:
+        query = query.filter(models.Job.location.ilike(f"%{location}%"))
+    if remote is not None:
+        query = query.filter(models.Job.remote == remote)
+    if tags:
+        # Tag filtering: match at least one tag
+        for tag in tags:
+            query = query.filter(models.Job.tags.ilike(f"%{tag}%"))
+    query = query.order_by(models.Job.created_at.desc()).offset(skip).limit(limit)
+    jobs = query.all()
+    return [
+        JobPublic(
+            id=job.id,
+            title=job.title,
+            description=job.description,
+            requirements=job.requirements_list,
+            location=job.location,
+            company=job.company,
+            salary_min=job.salary_min,
+            salary_max=job.salary_max,
+            remote=job.remote,
+            tags=job.tags_list,
+            employer_id=job.employer_id
+        )
+        for job in jobs
+    ]
 
 @router.get("/jobs/{job_id}", response_model=JobPublic, tags=["Jobs"], summary="Get job by ID")
-def get_job(job_id: int):
+def get_job(job_id: int, db: Session = Depends(get_db)):
     """
     Get job details.
     """
-    pass
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return JobPublic(
+        id=job.id,
+        title=job.title,
+        description=job.description,
+        requirements=job.requirements_list,
+        location=job.location,
+        company=job.company,
+        salary_min=job.salary_min,
+        salary_max=job.salary_max,
+        remote=job.remote,
+        tags=job.tags_list,
+        employer_id=job.employer_id
+    )
 
 @router.patch("/jobs/{job_id}", response_model=JobPublic, tags=["Jobs"], summary="Update job posting")
-def update_job(job_id: int, job: JobUpdate, current_user=Depends(require_role(Role.employer))):
+def update_job(
+    job_id: int,
+    job: JobUpdate,
+    current_user: User = Depends(require_role(Role.employer)),
+    db: Session = Depends(get_db)
+):
     """
     Employer updates a job posting.
     """
-    pass
+    db_job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not db_job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    # Only employer who posted or admin can update
+    user_role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+    if db_job.employer_id != current_user.id and user_role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized to update this job posting.")
+
+    for field in [
+        "title", "description", "requirements", "location", "company",
+        "salary_min", "salary_max", "remote", "tags"
+    ]:
+        val = getattr(job, field)
+        if val is not None:
+            if field == "requirements":
+                db_job.requirements = models.list_to_str(val)
+            elif field == "tags":
+                db_job.tags = models.list_to_str(val)
+            else:
+                setattr(db_job, field, val)
+    db.commit()
+    db.refresh(db_job)
+    return JobPublic(
+        id=db_job.id,
+        title=db_job.title,
+        description=db_job.description,
+        requirements=db_job.requirements_list,
+        location=db_job.location,
+        company=db_job.company,
+        salary_min=db_job.salary_min,
+        salary_max=db_job.salary_max,
+        remote=db_job.remote,
+        tags=db_job.tags_list,
+        employer_id=db_job.employer_id
+    )
 
 @router.delete("/jobs/{job_id}", status_code=204, tags=["Jobs"], summary="Delete job posting")
-def delete_job(job_id: int, current_user=Depends(require_role(Role.employer))):
+def delete_job(
+    job_id: int,
+    current_user: User = Depends(require_role(Role.employer)),
+    db: Session = Depends(get_db)
+):
     """
     Employer deletes a job posting.
     """
-    pass
+    db_job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not db_job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    # Only employer who posted or admin can delete
+    user_role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+    if db_job.employer_id != current_user.id and user_role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized to delete this job posting.")
+
+    db.delete(db_job)
+    db.commit()
+    return
 
 # ------------- Applications -----------------
 
