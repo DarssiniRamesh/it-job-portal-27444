@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Optional
+from sqlalchemy.orm import Session
 
 from .schemas import (
     UserCreate, UserUpdate, UserPublic, Role,
@@ -7,81 +8,173 @@ from .schemas import (
     JobCreate, JobUpdate, JobPublic,
     ApplicationCreate, ApplicationUpdate, ApplicationPublic
 )
-
-## Dummy dependencies and user role checks for demonstration. Replace with real authentication/authorization logic in production.
-def get_current_user():
-    """
-    Dummy dependency to simulate user retrieval. Replace with session/auth token logic.
-    """
-    class User:
-        id = 1
-        email = "admin@example.com"
-        full_name = "Admin"
-        role = Role.admin
-    return User()
-
-def require_role(required_role: Role):
-    def role_checker(current_user=Depends(get_current_user)):
-        if current_user.role != required_role and current_user.role != Role.admin:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return current_user
-    return role_checker
+from .models import User, Profile, RoleEnum
+from .db import get_db
+from .auth import (
+    require_role, get_current_user, get_password_hash
+)
 
 router = APIRouter()
 
 # ------------------- Users -------------------
 
+# PUBLIC_INTERFACE
 @router.post("/users", response_model=UserPublic, tags=["Users"], summary="Register user")
-def create_user(user: UserCreate):
+def create_user(user: UserCreate, db: Session = Depends(get_db)):
     """
     Register a new user (job seeker or employer).
     """
-    # Logic to create user goes here.
-    pass
+    db_user = db.query(User).filter(User.email == user.email).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered.")
+    db_user = User(
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        hashed_password=get_password_hash(user.password),
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    # Create empty profile for the user, job seekers only
+    if db_user.role == RoleEnum.job_seeker:
+        profile = Profile(user_id=db_user.id)
+        db.add(profile)
+        db.commit()
+    return UserPublic(
+        id=db_user.id,
+        email=db_user.email,
+        full_name=db_user.full_name,
+        role=db_user.role.value if hasattr(db_user.role, "value") else db_user.role,
+    )
 
+# PUBLIC_INTERFACE
 @router.get("/users/me", response_model=UserPublic, tags=["Users"], summary="Current user info")
-def get_me(current_user=Depends(get_current_user)):
+def get_me(current_user: User = Depends(get_current_user)):
     """
     Get profile info for currently logged-in user.
     """
-    return current_user
+    return UserPublic(
+        id=current_user.id,
+        email=current_user.email,
+        full_name=current_user.full_name,
+        role=current_user.role.value if hasattr(current_user.role, "value") else current_user.role,
+    )
 
+# PUBLIC_INTERFACE
 @router.get("/users/{user_id}", response_model=UserPublic, tags=["Users"], summary="Get user by ID")
-def get_user(user_id: int, current_user=Depends(require_role(Role.admin))):
+def get_user(user_id: int, current_user: User = Depends(require_role(Role.admin)), db: Session = Depends(get_db)):
     """
     Retrieve a user account by id. Only accessible by admins.
     """
-    pass
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return UserPublic(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role.value if hasattr(user.role, "value") else user.role,
+    )
 
+# PUBLIC_INTERFACE
 @router.patch("/users/{user_id}", response_model=UserPublic, tags=["Users"], summary="Update user")
-def update_user(user_id: int, user: UserUpdate, current_user=Depends(get_current_user)):
+def update_user(
+    user_id: int,
+    user: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """
     Update account info for the given user. Must be self or admin.
     """
-    pass
+    if not (current_user.id == user_id or (current_user.role.value if hasattr(current_user.role, 'value') else current_user.role) == "admin"):
+        raise HTTPException(status_code=403, detail="Not authorized to update this user.")
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if user.full_name is not None:
+        db_user.full_name = user.full_name
+    if user.password is not None:
+        db_user.hashed_password = get_password_hash(user.password)
+    db.commit()
+    db.refresh(db_user)
+    return UserPublic(
+        id=db_user.id,
+        email=db_user.email,
+        full_name=db_user.full_name,
+        role=db_user.role.value if hasattr(db_user.role, "value") else db_user.role,
+    )
 
+# PUBLIC_INTERFACE
 @router.delete("/users/{user_id}", status_code=204, tags=["Users"], summary="Delete user")
-def delete_user(user_id: int, current_user=Depends(require_role(Role.admin))):
+def delete_user(
+    user_id: int,
+    current_user: User = Depends(require_role(Role.admin)),
+    db: Session = Depends(get_db)
+):
     """
     Delete a user account. Only accessible by admins.
     """
-    pass
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    db.delete(user)
+    db.commit()
+    return
 
 # --------------- Profile ---------------------
 
+# PUBLIC_INTERFACE
 @router.get("/profiles/{user_id}", response_model=ProfilePublic, tags=["Profiles"], summary="Get user profile")
-def get_profile(user_id: int):
+def get_profile(user_id: int, db: Session = Depends(get_db)):
     """
     Retrieve the profile for a given user (public, read-only).
     """
-    pass
+    profile = db.query(Profile).filter(Profile.user_id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found for this user.")
+    return ProfilePublic(
+        id=profile.id,
+        user_id=profile.user_id,
+        headline=profile.headline,
+        skills=profile.skills_list,
+        experience=profile.experience,
+        education=profile.education,
+    )
 
+# PUBLIC_INTERFACE
 @router.put("/profiles/me", response_model=ProfilePublic, tags=["Profiles"], summary="Update my profile")
-def update_profile(profile: ProfileUpdate, current_user=Depends(require_role(Role.job_seeker))):
+def update_profile(
+    profile: ProfileUpdate,
+    current_user: User = Depends(require_role(Role.job_seeker)),
+    db: Session = Depends(get_db)
+):
     """
     Update the authenticated user's profile.
     """
-    pass
+    db_profile = db.query(Profile).filter(Profile.user_id == current_user.id).first()
+    if not db_profile:
+        db_profile = Profile(user_id=current_user.id)
+        db.add(db_profile)
+    if profile.headline is not None:
+        db_profile.headline = profile.headline
+    if profile.skills is not None:
+        db_profile.skills_list = profile.skills
+    if profile.experience is not None:
+        db_profile.experience = profile.experience
+    if profile.education is not None:
+        db_profile.education = profile.education
+    db.commit()
+    db.refresh(db_profile)
+    return ProfilePublic(
+        id=db_profile.id,
+        user_id=db_profile.user_id,
+        headline=db_profile.headline,
+        skills=db_profile.skills_list,
+        experience=db_profile.experience,
+        education=db_profile.education,
+    )
 
 # --------------- Jobs ------------------------
 
