@@ -11,11 +11,15 @@ from .auth import create_access_token, get_password_hash, authenticate_user
 from .models import User
 from .schemas import UserCreate, UserPublic
 
+# Import dashboard endpoints
+from . import dashboard
+
 openapi_tags = [
     {"name": "Users", "description": "User registration, profile, and admin management."},
     {"name": "Jobs", "description": "Manage job postings (create, search, update, delete)."},
     {"name": "Applications", "description": "Job applications workflow."},
-    {"name": "Profiles", "description": "Profile management for job seekers."}
+    {"name": "Profiles", "description": "Profile management for job seekers."},
+    {"name": "Dashboard", "description": "Aggregate dashboard data for employers and job seekers."}
 ]
 
 app = FastAPI(
@@ -86,6 +90,7 @@ def login(
 # Mount REST API routes and auth router
 app.include_router(auth_router)
 app.include_router(api_router)
+app.include_router(dashboard.router)
 
 @app.get("/", tags=["Users"])
 def health_check():
