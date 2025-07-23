@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status, HTTPException, Depends
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Depends, HTTPException, status
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
@@ -29,13 +30,48 @@ app = FastAPI(
     openapi_tags=openapi_tags
 )
 
+# --- Robust, production-friendly CORS configuration ---
+# (For production: change allow_origins to specific domains as needed)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # TODO: restrict in production.
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Security Middleware: Add basic security headers ---
+class SecureHeadersMiddleware(BaseHTTPMiddleware):
+    """Add common security headers to all responses."""
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+        return response
+
+app.add_middleware(SecureHeadersMiddleware)
+
+# --- Robust Exception Handlers ---
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Custom HTTPException handler with structured response."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail, "type": "HTTPException"},
+    )
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Catch-all for uncaught exceptions with logging."""
+    # Log exception here if using logging system
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"error": "An unexpected error occurred.", "type": "InternalServerError"},
+    )
 
 # Initialize tables at startup if not already present
 @app.on_event("startup")
@@ -96,3 +132,4 @@ app.include_router(dashboard.router)
 def health_check():
     """Health check endpoint."""
     return {"message": "Healthy"}
+
