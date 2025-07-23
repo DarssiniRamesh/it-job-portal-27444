@@ -226,20 +226,42 @@ def create_job(
         employer_id=db_job.employer_id
     )
 
-@router.get("/jobs", response_model=List[JobPublic], tags=["Jobs"], summary="List/search jobs")
+# PUBLIC_INTERFACE
+@router.get(
+    "/jobs",
+    response_model=List[JobPublic],
+    summary="List/search jobs",
+    tags=["Jobs"],
+    responses={
+        200: {
+            "description": "Successful Response",
+        }
+    },
+)
 def list_jobs(
     q: Optional[str] = Query(None, description="Free-text search"),
-    location: Optional[str] = None,
-    remote: Optional[bool] = None,
+    location: Optional[str] = Query(None, description="Filter by job location"),
+    remote: Optional[bool] = Query(None, description="Remote job type only"),
     tags: Optional[List[str]] = Query(None, description="Filter by skills/tags"),
-    skip: int = 0,
-    limit: int = 20,
+    skip: int = Query(0, ge=0, description="Number of records to skip (for pagination)"),
+    limit: int = Query(20, ge=1, le=100, description="Max number of records to return"),
     db: Session = Depends(get_db)
 ):
     """
-    Search and filter job postings.
+    Search/filter job postings by keyword (title, description, company, location), location, job type (remote/non-remote),
+    required tags (skills), with pagination and sorted by most recent jobs.
+
+    - **q**: Free-text search.
+    - **location**: Filter by job location.
+    - **remote**: Only show remote or onsite jobs.
+    - **tags**: Job must include all supplied tags (AND semantics).
+    - **skip**: Number of records to skip (for pagination).
+    - **limit**: Page size (default 20, max 100).
+
+    Returns a list of jobs as per seeker discovery/business rules.
     """
     query = db.query(models.Job)
+    # Keyword search
     if q:
         search = f"%{q}%"
         query = query.filter(
@@ -250,16 +272,22 @@ def list_jobs(
                 models.Job.location.ilike(search)
             )
         )
+    # Filter by location
     if location:
         query = query.filter(models.Job.location.ilike(f"%{location}%"))
+    # Filter by job type (remote/onsite)
     if remote is not None:
         query = query.filter(models.Job.remote == remote)
+    # Tag/skills filter (all tags must be present: AND semantics)
     if tags:
-        # Tag filtering: match at least one tag
         for tag in tags:
             query = query.filter(models.Job.tags.ilike(f"%{tag}%"))
-    query = query.order_by(models.Job.created_at.desc()).offset(skip).limit(limit)
+    # Sort most recent jobs first
+    query = query.order_by(models.Job.created_at.desc())
+    # Pagination
+    query = query.offset(skip).limit(limit)
     jobs = query.all()
+    # Project to public schema
     return [
         JobPublic(
             id=job.id,
