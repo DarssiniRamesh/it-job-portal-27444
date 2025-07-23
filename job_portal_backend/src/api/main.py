@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .endpoints import router as api_router
+from .db import init_db
 
 openapi_tags = [
     {"name": "Users", "description": "User registration, profile, and admin management."},
@@ -24,6 +25,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize tables at startup if not already present
+@app.on_event("startup")
+def _create_tables_if_needed():
+    init_db()
 
 # Mount REST API routes
 app.include_router(api_router)
