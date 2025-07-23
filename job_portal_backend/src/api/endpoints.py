@@ -369,33 +369,145 @@ def delete_job(
 # ------------- Applications -----------------
 
 @router.post("/applications", response_model=ApplicationPublic, tags=["Applications"], summary="Apply to job")
-def create_application(app: ApplicationCreate, current_user=Depends(require_role(Role.job_seeker))):
+def create_application(app: ApplicationCreate, current_user=Depends(require_role(Role.job_seeker)), db: Session = Depends(get_db)):
     """
     Submit a job application as a job seeker.
+    Only allow job seekers to apply; prevent multiple applications to the same job by the same user.
     """
-    pass
+    # Double-check user_id matches current_user.id
+    if app.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Cannot apply for another user.")
+
+    # Check that job exists
+    db_job = db.query(models.Job).filter(models.Job.id == app.job_id).first()
+    if not db_job:
+        raise HTTPException(status_code=404, detail="Target job not found.")
+
+    # Check if user has already applied to this job
+    exists = db.query(models.Application).filter(
+        models.Application.user_id == current_user.id,
+        models.Application.job_id == app.job_id
+    ).first()
+    if exists:
+        raise HTTPException(status_code=400, detail="Already applied to this job.")
+
+    db_app = models.Application(
+        job_id=app.job_id,
+        user_id=current_user.id,
+        cover_letter=app.cover_letter,
+        status=models.ApplicationStatusEnum.submitted
+    )
+    db.add(db_app)
+    db.commit()
+    db.refresh(db_app)
+    return ApplicationPublic(
+        id=db_app.id,
+        job_id=db_app.job_id,
+        user_id=db_app.user_id,
+        cover_letter=db_app.cover_letter,
+        status=db_app.status.value if hasattr(db_app.status, "value") else db_app.status
+    )
+
 
 @router.get("/applications/{app_id}", response_model=ApplicationPublic, tags=["Applications"], summary="Get application")
-def get_application(app_id: int, current_user=Depends(get_current_user)):
+def get_application(app_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    Get single application. Job seekers must be owner, employers must own job.
+    Get single application.
+    - Job seekers: must be the owner of the application.
+    - Employers: must own the job for this application.
+    - Admin: full access.
     """
-    pass
+    db_app = db.query(models.Application).filter(models.Application.id == app_id).first()
+    if not db_app:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    user_role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+
+    # Check permissions
+    if user_role == "job_seeker":
+        if db_app.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this application.")
+    elif user_role == "employer":
+        # Employer can only view apps for their own jobs
+        if not db_app.job or db_app.job.employer_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this application.")
+    elif user_role == "admin":
+        pass
+    else:
+        raise HTTPException(status_code=403, detail="Insufficient role to view application.")
+
+    return ApplicationPublic(
+        id=db_app.id,
+        job_id=db_app.job_id,
+        user_id=db_app.user_id,
+        cover_letter=db_app.cover_letter,
+        status=db_app.status.value if hasattr(db_app.status, "value") else db_app.status
+    )
 
 @router.get("/applications", response_model=List[ApplicationPublic], tags=["Applications"], summary="List my applications")
-def list_my_applications(current_user=Depends(get_current_user)):
+def list_my_applications(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     """
     List all job applications submitted by the current job seeker.
+    Employers/admin will see nothing (unless expanded later).
     """
-    pass
+    user_role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+
+    if user_role != "job_seeker":
+        return []
+
+    db_apps = db.query(models.Application).filter(
+        models.Application.user_id == current_user.id
+    ).order_by(models.Application.created_at.desc()).all()
+
+    return [
+        ApplicationPublic(
+            id=app.id,
+            job_id=app.job_id,
+            user_id=app.user_id,
+            cover_letter=app.cover_letter,
+            status=app.status.value if hasattr(app.status, "value") else app.status
+        )
+        for app in db_apps
+    ]
 
 @router.patch("/applications/{app_id}", response_model=ApplicationPublic, tags=["Applications"], summary="Manage application")
 def update_application(
     app_id: int, 
     update: ApplicationUpdate, 
     current_user=Depends(require_role(Role.employer)),
+    db: Session = Depends(get_db)
 ):
     """
     Update application status/notes (employer action).
+    Only the employer that owns the job is allowed to manage applicants.
+    Allowed status transitions: employer can set 'viewed', 'shortlisted', 'rejected', or 'accepted'.
     """
-    pass
+    db_app = db.query(models.Application).filter(models.Application.id == app_id).first()
+    if not db_app:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    db_job = db.query(models.Job).filter(models.Job.id == db_app.job_id).first()
+    if not db_job or db_job.employer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Cannot manage applications for jobs you do not own.")
+
+    if update.status:
+        allowed_statuses = {"viewed", "shortlisted", "rejected", "accepted"}
+        if update.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid status. Allowed: viewed, shortlisted, rejected, accepted."
+            )
+        db_app.status = getattr(models.ApplicationStatusEnum, update.status)
+
+    if update.notes is not None:
+        db_app.notes = update.notes
+
+    db.commit()
+    db.refresh(db_app)
+    return ApplicationPublic(
+        id=db_app.id,
+        job_id=db_app.job_id,
+        user_id=db_app.user_id,
+        cover_letter=db_app.cover_letter,
+        status=db_app.status.value if hasattr(db_app.status, "value") else db_app.status
+    )
